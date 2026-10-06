@@ -431,6 +431,7 @@ When the bot is in a voice channel:
 - Transcripts appear in the text channel: `[Voice] @user: what you said`
 - Agent responses are sent as text in the channel AND spoken in the VC
 - The text channel is the one where `/voice join` was issued
+- Running `/voice join` from another text channel moves the binding there; speech captured before the move, whether still being transcribed or not yet finished, is dropped, not posted to the new channel
 
 ### Echo Prevention
 
@@ -438,7 +439,7 @@ The bot automatically pauses its audio listener while playing TTS replies, preve
 
 ### Access Control
 
-Only users listed in `DISCORD_ALLOWED_USERS` can interact via voice. Other users' audio is silently ignored.
+Only users allowed by `DISCORD_ALLOWED_USERS` or `DISCORD_ALLOWED_ROLES` can interact via voice; a role is checked for the speaker each time they talk. Other users' audio is silently ignored.
 
 ```bash
 # ~/.hermes/.env
@@ -469,7 +470,7 @@ stt:
                                     # passes its path to the agent as part of the
                                     # inbound message, useful for custom pipelines
                                     # (diarization, alignment, archival, etc.)
-  provider: "local"                  # "local" (free) | "groq" | "openai" | "mistral" | "xai"
+  provider: "local"                  # "local" (free) | "groq" | "openai" | "mistral" | "xai" | "elevenlabs" | "deepinfra"
   local:
     model: "base"                    # tiny, base, small, medium, large-v3
     language: ""                     # optional ISO-639-1 hint; blank = use HERMES_LOCAL_STT_LANGUAGE if set, else auto-detect
@@ -537,9 +538,13 @@ DISCORD_ALLOWED_USERS=...
 | **OpenAI** | `gpt-4o-transcribe` | Medium (~2s) | Best | Paid | Yes |
 | **OpenAI** | `gpt-transcribe` | Fast | Best | Paid ($0.0045/min) | Yes |
 | **Mistral** | `voxtral-mini-latest` | Fast | Good | Paid | Yes |
-| **xAI** | `grok-stt` | Fast | Good | Paid | Yes |
+| **xAI** | `grok-voice-transcribe-2.0` | Fast | Best | Paid ($0.10/hr batch) | Yes |
 
 Provider priority (automatic fallback): **local** > **groq** > **openai**
+
+### Long recordings and upload limits
+
+Cloud providers cap a single request: OpenAI and Groq accept 25 MB, Mistral 500 MB (60 minutes), xAI 500 MB and ElevenLabs just under 5 GB. Some OpenAI models also have a practical length limit per request: about 7.5 minutes for `gpt-4o-transcribe` and `gpt-4o-mini-transcribe` (their 2,000-token output ceiling) and 10 minutes for `whisper-1` (so each request finishes inside the default 60 s timeout). When a voice note, audio attachment or voice-mode recording is over the active provider's limit, Hermes first re-encodes it to compact 16 kHz mono AAC, which fits most recordings into one request. If it is still too large, Hermes splits it at pauses, transcribes the pieces in order and joins the text. Local providers have no upload limit and are never split. ffmpeg is required for both steps.
 
 ### TTS Provider Comparison
 
