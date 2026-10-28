@@ -17,6 +17,7 @@ from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli.goals import judge_goal
+from tools import kanban_heartbeat_rate as _heartbeat_rate
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from tools.kanban_tools_schemas import (
@@ -562,7 +563,13 @@ def register_current_worker_from_env() -> bool:
 def heartbeat_current_worker_from_env() -> bool:
     """Claim extension + board heartbeat for the current worker; True iff both writes
     succeed. ``HERMES_KANBAN_RUN_ID`` pins the run row so a reclaimed stale run is not
-    heartbeated; ``HERMES_KANBAN_CLAIM_LOCK`` absent -> default claimer (local workers)."""
+    heartbeated; ``HERMES_KANBAN_CLAIM_LOCK`` absent -> default claimer (local workers).
+
+    Two rate limits apply (Team-Klärung t_9d2cdb94): the 60s window of this
+    bridge and the shared client-side limiter (30s minimum gap per task +
+    storm guard), so a worker cannot flood the board with heartbeat writes
+    that keep a stalled run looking alive.
+    """
     global _auto_heartbeat_last_attempt, _auto_heartbeat_fence_warned
     tid = os.environ.get("HERMES_KANBAN_TASK")
     now = time.monotonic()
@@ -571,6 +578,14 @@ def heartbeat_current_worker_from_env() -> bool:
     if _is_delegated_child_context():
         # An in-process delegate child's activity is not the worker's liveness; checked before
         # stamping the window so a chatty child cannot starve the worker's own heartbeat.
+        return False
+    decision = _heartbeat_rate.check(tid)
+    if not decision.allowed:
+        # Dropped by the client-side limiter (dedupe window or storm): no write,
+        # no claim extension — a storm of heartbeats must not keep a stalled
+        # run looking alive to the stale-claim watchdog.
+        logger.debug(
+            "auto-heartbeat: dropped (%s) for task %s", decision.verdict, tid)
         return False
     _auto_heartbeat_last_attempt = now
     try:
@@ -933,9 +948,27 @@ def _handle_request_changes(args: dict, **kw) -> str:
 def _handle_heartbeat(args: dict, **kw) -> str:
     """Signal liveness: extend the claim TTL AND record a heartbeat event.
     Without the claim half, a worker blocked in one long tool call would still
-    be reclaimed by ``release_stale_claims``."""
+    be reclaimed by ``release_stale_claims``.
+
+    Rate-limited client-side (Team-Klärung t_9d2cdb94): at least 30 s between
+    two heartbeat writes for the same task, and more than 10 heartbeats per
+    minute is treated as a storm. A dropped write is a *success* no-op — the
+    model must not be punished for a heartbeat the board already has — but the
+    storm is recorded as an event so the suspicion is visible on the board.
+    """
     tid = _worker_guard("kanban_heartbeat", args)
     from hermes_cli import kanban_db_dispatch as kbd
+    decision = _heartbeat_rate.check(tid)
+    if not decision.allowed:
+        if decision.verdict == _heartbeat_rate.STORM and decision.first_in_burst:
+            _record_heartbeat_storm(tid, decision)
+        return _ok(
+            task_id=tid,
+            heartbeat="dropped",
+            reason=decision.verdict,
+            per_minute=decision.per_minute,
+            retry_after=round(decision.retry_after, 1),
+        )
     with _board(args.get("board")) as (kb, conn):
         # The dispatcher pins HERMES_KANBAN_CLAIM_LOCK at spawn; the default
         # claimer covers locally-driven workers that bypassed the dispatcher.
@@ -943,7 +976,29 @@ def _handle_heartbeat(args: dict, **kw) -> str:
         ok = kbd.heartbeat_worker(
             conn, tid, note=args.get("note"), expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not heartbeat {tid} (unknown id or not running)")
-        return _ok(task_id=tid)
+        return _ok(task_id=tid, heartbeat="recorded", per_minute=decision.per_minute)
+
+
+def _record_heartbeat_storm(tid: str, decision) -> None:
+    """Note a suspected heartbeat storm on the board (once per burst).
+
+    Best-effort: the storm must never turn into an error the worker has to
+    handle — the point is only that the suspicion is visible in the events.
+    """
+    try:
+        from hermes_cli import kanban_db_dispatch as kbd
+        with _board(None, quiet_close=True) as (kb, conn):
+            kb._append_event(
+                conn, tid, "heartbeat_storm",
+                {
+                    "per_minute": decision.per_minute,
+                    "threshold": _heartbeat_rate.HEARTBEAT_STORM_THRESHOLD_PER_MINUTE,
+                    "min_interval_seconds": _heartbeat_rate.HEARTBEAT_MIN_INTERVAL_SECONDS,
+                },
+                run_id=_worker_run_id(tid),
+            )
+    except Exception:
+        logger.debug("heartbeat storm note for %s failed", tid, exc_info=True)
 
 
 @_kanban_handler("kanban_comment")
