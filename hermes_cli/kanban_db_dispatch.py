@@ -31,6 +31,11 @@ if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
 
 
+# Sentinel: "argument not passed" — the value is resolved from config.yaml.
+# A plain ``None`` means "explicitly disabled" (no cap / storm detection off).
+_UNSET = object()
+
+
 # After this many consecutive non-success attempts on a task/profile the
 # dispatcher parks the task in ``blocked`` with a reason — prevents retry storms.
 DEFAULT_FAILURE_LIMIT = 2
@@ -645,17 +650,33 @@ def heartbeat_worker(
     return True
 
 
-def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str]:
+def enforce_max_runtime(
+    conn: sqlite3.Connection, *, signal_fn=None, default_max_runtime: Any = _UNSET,
+) -> list[str]:
     """Terminate workers whose per-task ``max_runtime_seconds`` has elapsed.
 
     SIGTERM, short grace, then SIGKILL. Emits ``timed_out`` and restores the
     task's source phase so the next tick re-spawns the same kind of worker —
     unless the circuit breaker already gave up, leaving it blocked. Host-local
     only (same reasoning as ``detect_crashed_workers``). ``signal_fn`` is a test hook.
+
+    A task with NO explicit ``max_runtime_seconds`` is capped by
+    ``default_max_runtime`` (the dispatcher-side default, 4h unless configured
+    otherwise) — without it such a task has no upper runtime bound at all and a
+    wedged worker runs forever. An explicit per-task value always wins,
+    including values larger than the default. ``default_max_runtime=None``
+    explicitly disables the default cap (unbounded); omitting the argument
+    resolves it from ``config.yaml``.
     """
     timed_out: list[str] = []
     now = int(time.time())
     host_prefix = _kb._host_prefix()
+    if default_max_runtime is _UNSET:
+        default_max_runtime = resolve_default_max_runtime_seconds()
+    try:
+        default_cap = int(default_max_runtime) if default_max_runtime else None
+    except (TypeError, ValueError):
+        default_cap = None
 
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, t.worker_started_at, "
@@ -663,9 +684,11 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         "       t.max_runtime_seconds, t.claim_lock "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
+        "WHERE t.status = 'running' "
+        "  AND (t.max_runtime_seconds IS NOT NULL OR ? IS NOT NULL) "
         "  AND COALESCE(r.started_at, t.started_at) IS NOT NULL "
-        "  AND t.worker_pid IS NOT NULL"
+        "  AND t.worker_pid IS NOT NULL",
+        (default_cap,),
     ).fetchall()
     for row in rows:
         lock = row["claim_lock"] or ""
@@ -674,7 +697,10 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         # Runtime is per attempt: ``tasks.started_at`` records the FIRST start,
         # so retries must be measured from the active task_runs row.
         elapsed = now - int(row["active_started_at"])
-        limit = int(row["max_runtime_seconds"])
+        explicit = row["max_runtime_seconds"]
+        limit = int(explicit) if explicit is not None else (default_cap or 0)
+        if limit <= 0:
+            continue
         if elapsed < limit:
             continue
 
@@ -744,12 +770,89 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
 # ``dispatch_stale_timeout_seconds`` (spec: ">4h started + no commits in 1h").
 _STALE_HEARTBEAT_GAP_SECONDS = 3600
 
+# Sliding window (seconds) used to count a task's heartbeats for storm
+# detection. One minute matches the "10 heartbeats per minute" contract.
+_HEARTBEAT_STORM_WINDOW_SECONDS = 60
+
+# Default cap (seconds) for a running task that has no explicit
+# ``max_runtime_seconds``. Mirrors ``kanban.dispatch_default_max_runtime_seconds``
+# in config.yaml; the config value wins when set.
+DEFAULT_MAX_RUNTIME_SECONDS = 14400
+
+
+def resolve_default_max_runtime_seconds() -> Optional[int]:
+    """The dispatcher-side default runtime cap for tasks without an explicit one.
+
+    ``None`` = no default cap (unbounded). A configured value of 0 disables the
+    cap, every positive value is used verbatim.
+    """
+    try:
+        from hermes_cli.config import load_config
+        raw = (load_config() or {}).get("kanban", {}).get(
+            "dispatch_default_max_runtime_seconds", DEFAULT_MAX_RUNTIME_SECONDS)
+    except Exception:
+        return DEFAULT_MAX_RUNTIME_SECONDS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_RUNTIME_SECONDS
+    return value if value > 0 else None
+
+
+def resolve_heartbeat_storm_threshold() -> Optional[int]:
+    """Heartbeat-storm threshold (``kanban.heartbeat_storm_threshold``).
+
+    ``None`` = storm detection off. A configured value of 0 disables it.
+    """
+    try:
+        from hermes_cli.config import load_config
+        raw = (load_config() or {}).get("kanban", {}).get("heartbeat_storm_threshold", 10)
+    except Exception:
+        return 10
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 10
+    return value if value > 0 else None
+
+
+def _heartbeat_storm_counts(
+    conn: sqlite3.Connection,
+    now: int,
+    task_ids: Iterable[str],
+    window_seconds: int = _HEARTBEAT_STORM_WINDOW_SECONDS,
+) -> dict[str, int]:
+    """Heartbeat events per task inside the sliding window ending at ``now``.
+
+    Counts ``task_events`` rows of kind ``heartbeat`` — the durable record of
+    every heartbeat, independent of the denormalized ``last_heartbeat_at``
+    column (which only keeps the newest timestamp and would hide a storm).
+
+    Only the given ``task_ids`` are counted: the event table grows without
+    bound (one row per heartbeat), and a scan over all of them would cost the
+    dispatcher tick seconds on a long-lived board. The per-task predicate hits
+    ``idx_events_task`` (task_id, created_at) directly.
+    """
+    ids = [str(t) for t in task_ids]
+    if not ids:
+        return {}
+    since = now - int(window_seconds)
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        "SELECT task_id, COUNT(*) AS n FROM task_events "
+        f"WHERE kind = 'heartbeat' AND created_at >= ? AND task_id IN ({placeholders}) "
+        "GROUP BY task_id",
+        (since, *ids),
+    ).fetchall()
+    return {row["task_id"]: int(row["n"]) for row in rows}
+
 
 def detect_stale_running(
     conn: sqlite3.Connection,
     *,
     stale_timeout_seconds: int = 0,
     signal_fn=None,
+    heartbeat_storm_threshold: Any = _UNSET,
 ) -> list[str]:
     """Reclaim ``running`` tasks with no heartbeat progress; returns their ids.
 
@@ -760,12 +863,29 @@ def detect_stale_running(
     ``0`` disables the check; ``signal_fn`` is a test hook. Deliberately NOT
     counted via ``_record_task_failure``: an absent heartbeat is not a worker
     failure, and counting it would let long-running tasks trip the breaker.
+
+    Heartbeat storm: a task that emits more than ``heartbeat_storm_threshold``
+    heartbeats within a 60-second window is treated as if it had NO heartbeat —
+    its heartbeats are not a liveness signal but a symptom of a wedged worker
+    (e.g. a heartbeat loop in a retry path). Such a task is reclaimed once it
+    has been running longer than ``stale_timeout_seconds``, exactly like a
+    task that never sent a heartbeat. ``heartbeat_storm_threshold=None``
+    explicitly disables storm detection; omitting the argument resolves it
+    from ``config.yaml``.
     """
     if stale_timeout_seconds <= 0:
         return []
 
     now = int(time.time())
     reclaimed: list[str] = []
+
+    if heartbeat_storm_threshold is _UNSET:
+        heartbeat_storm_threshold = resolve_heartbeat_storm_threshold()
+    storm_limit = 0
+    try:
+        storm_limit = int(heartbeat_storm_threshold) if heartbeat_storm_threshold else 0
+    except (TypeError, ValueError):
+        storm_limit = 0
 
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, t.worker_started_at, t.last_heartbeat_at, t.claim_lock, "
@@ -774,6 +894,18 @@ def detect_stale_running(
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running'"
     ).fetchall()
+
+    # Only tasks that are already past the stale timeout can be reclaimed, so
+    # the storm counter only needs those — the event table is huge and grows
+    # with every heartbeat.
+    candidates = [
+        row["id"] for row in rows
+        if row["active_started_at"] is not None
+        and (now - int(row["active_started_at"])) >= stale_timeout_seconds
+    ]
+    storm_counts = (
+        _heartbeat_storm_counts(conn, now, candidates) if storm_limit > 0 else {}
+    )
 
     for row in rows:
         if row["active_started_at"] is None:
@@ -784,7 +916,11 @@ def detect_stale_running(
 
         last_hb = row["last_heartbeat_at"]
         hb_age = (now - int(last_hb)) if last_hb is not None else None
-        if hb_age is not None and hb_age < _STALE_HEARTBEAT_GAP_SECONDS:
+        hb_count = storm_counts.get(row["id"], 0)
+        storming = storm_limit > 0 and hb_count > storm_limit
+        if not storming and hb_age is not None and hb_age < _STALE_HEARTBEAT_GAP_SECONDS:
+            # A recent heartbeat is a liveness signal — unless the task is
+            # heartbeating in a storm (see above), where it proves nothing.
             continue
 
         pid = row["worker_pid"]
@@ -824,15 +960,24 @@ def detect_stale_running(
                 "pid": int(pid) if pid else None,
                 "retry_status": retry_status,
             }
+            if storming:
+                payload["heartbeat_storm"] = True
+                payload["heartbeat_count_window"] = int(hb_count)
+                payload["heartbeat_storm_threshold"] = storm_limit
+                payload["heartbeat_storm_window_seconds"] = _HEARTBEAT_STORM_WINDOW_SECONDS
             payload.update(termination)
 
             run_id = _kb._end_run(
                 conn, tid,
                 outcome="stale", status="stale",
                 error=(
-                    f"no heartbeat for {int(hb_age)}s "
-                    if hb_age is not None
-                    else "no heartbeat ever"
+                    (f"heartbeat storm: {int(hb_count)} heartbeats in "
+                     f"{_HEARTBEAT_STORM_WINDOW_SECONDS}s (limit {storm_limit})")
+                    if storming else (
+                        f"no heartbeat for {int(hb_age)}s "
+                        if hb_age is not None
+                        else "no heartbeat ever"
+                    )
                 ) + f" after {int(elapsed)}s running",
                 metadata=payload,
             )
@@ -1964,6 +2109,8 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    default_max_runtime_seconds: Any = _UNSET,
+    heartbeat_storm_threshold: Any = _UNSET,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -1972,6 +2119,11 @@ def dispatch_once(
     frames. The loser returns an empty ``DispatchResult`` with
     ``skipped_locked=True`` and writes nothing; the lock is keyed on the
     resolved DB path so unrelated boards tick in parallel.
+
+    ``default_max_runtime_seconds`` caps every running task that has no
+    explicit ``max_runtime_seconds``; ``heartbeat_storm_threshold`` makes
+    heartbeats of a storming task stop counting as a liveness signal. Both
+    default to the values from ``config.yaml`` (``None`` = read from config).
     """
     def _locked_tick() -> DispatchResult:
         return _dispatch_once_locked(
@@ -1987,6 +2139,8 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            default_max_runtime_seconds=default_max_runtime_seconds,
+            heartbeat_storm_threshold=heartbeat_storm_threshold,
         )
 
     try:
@@ -2188,6 +2342,8 @@ def _run_reclaim_phase(
     failure_limit: int,
     reconcile_orphans: bool,
     board: Optional[str] = None,
+    default_max_runtime_seconds: Any = _UNSET,
+    heartbeat_storm_threshold: Any = _UNSET,
 ) -> None:
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
     reap_worker_zombies()
@@ -2195,13 +2351,17 @@ def _run_reclaim_phase(
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
     if reconcile_orphans:
         result.reconciled_orphans = reconcile_orphaned_running(conn)
-    result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
+    result.stale = detect_stale_running(
+        conn,
+        stale_timeout_seconds=stale_timeout_seconds,
+        heartbeat_storm_threshold=heartbeat_storm_threshold,
+    )
     result.crashed = detect_crashed_workers(conn, board=board)
     # Side-channel attributes (see detect_crashed_workers); rate-limited tasks
     # went back to ``ready`` and the respawn guard defers them until quota clears.
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
-    result.timed_out = enforce_max_runtime(conn)
+    result.timed_out = enforce_max_runtime(conn, default_max_runtime=default_max_runtime_seconds)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 
@@ -2339,6 +2499,8 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    default_max_runtime_seconds: Any = _UNSET,
+    heartbeat_storm_threshold: Any = _UNSET,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
@@ -2349,6 +2511,8 @@ def _dispatch_once_locked(
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
+        default_max_runtime_seconds=default_max_runtime_seconds,
+        heartbeat_storm_threshold=heartbeat_storm_threshold,
     )
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,

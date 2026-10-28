@@ -42,6 +42,43 @@ class _DispatcherSettings:
     reconcile_orphans: bool
     default_assignee: Optional[str]
     max_in_progress_per_profile: Optional[int]
+    # Default runtime cap (seconds) for running tasks without an explicit
+    # ``max_runtime_seconds``; None = read from config / built-in default.
+    default_max_runtime_seconds: Optional[int] = None
+    # Heartbeats per 60s above which a task counts as storming (heartbeats stop
+    # counting as a liveness signal); None = read from config / built-in default.
+    heartbeat_storm_threshold: Optional[int] = None
+
+
+def _runtime_cap_setting(kanban_cfg: dict, key: str, fallback) -> Optional[int]:
+    """Parse an optional ``kanban.<key>`` cap with a tri-state result.
+
+    * a positive int -> the cap is that value
+    * ``0``          -> the cap is explicitly DISABLED (``None``)
+    * key missing   -> the built-in default from ``fallback()``
+    * invalid value -> the built-in default from ``fallback()``
+
+    ``_positive_int_setting`` cannot express the difference between "off" and
+    "not configured" (both are ``None``), but the dispatcher needs it: an
+    absent key must fall back to the shipped default (4h cap / storm
+    threshold 10), while an explicit ``0`` must switch the feature off.
+    """
+    raw = kanban_cfg.get(key)
+    if raw is None:
+        return fallback()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("kanban dispatcher: invalid kanban.%s=%r; using default", key, raw)
+        return fallback()
+    if value < 0:
+        logger.warning("kanban dispatcher: kanban.%s=%r is negative; using default", key, raw)
+        return fallback()
+    if value == 0:
+        logger.info("kanban dispatcher: kanban.%s=0 -> feature disabled", key)
+        return None
+    logger.info("kanban dispatcher: %s=%d", key, value)
+    return value
 
 
 def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettings:
@@ -102,6 +139,25 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
         logger.info("kanban dispatcher: default_assignee=%r (unassigned ready tasks "
                     "will route to this profile)", default_assignee)
 
+    # Default runtime cap for running tasks WITHOUT an explicit
+    # ``max_runtime_seconds``. Without it such a task has no upper runtime
+    # bound and a wedged worker runs forever.
+    #
+    # Tri-state: a positive int = the cap; ``None`` = explicitly disabled
+    # (config value 0); a missing/invalid key falls back to the dispatcher
+    # module's own default (4h). ``None`` must stay distinguishable from
+    # "not configured" — downstream, ``None`` means "no cap".
+    default_max_runtime_seconds = _runtime_cap_setting(
+        kanban_cfg, "dispatch_default_max_runtime_seconds",
+        _kbd().resolve_default_max_runtime_seconds)
+
+    # Heartbeat storm: more than N heartbeats per 60s window means the
+    # heartbeats are not a liveness signal but a symptom of a wedged worker.
+    # Same tri-state as above; ``None`` = storm detection off.
+    heartbeat_storm_threshold = _runtime_cap_setting(
+        kanban_cfg, "heartbeat_storm_threshold",
+        _kbd().resolve_heartbeat_storm_threshold)
+
     return _DispatcherSettings(
         interval=interval,
         max_spawn=max_spawn,
@@ -115,6 +171,8 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
         # Per-profile concurrency cap: no single profile's local model / API
         # quota / browser pool gets overwhelmed by a fan-out.
         max_in_progress_per_profile=_positive_int_setting(kanban_cfg, "max_in_progress_per_profile"),
+        default_max_runtime_seconds=default_max_runtime_seconds,
+        heartbeat_storm_threshold=heartbeat_storm_threshold,
     )
 
 

@@ -1950,6 +1950,16 @@ DEFAULT_CONFIG = {
         # Running tasks with no heartbeat (last_heartbeat_at) for this many seconds are reclaimed to
         # ready on the next tick; a still-running local worker is terminated first. 0 = off.
         "dispatch_stale_timeout_seconds": 14400,
+        # Default runtime cap (seconds) applied dispatcher-side to every running task that has NO
+        # explicit ``max_runtime_seconds``. Without it a task without an explicit cap has no upper
+        # bound at all and a wedged worker runs forever. An explicit per-task value always wins
+        # (including values larger than this default). 0 = no default cap (unbounded).
+        "dispatch_default_max_runtime_seconds": 14400,
+        # Heartbeat storm threshold: more than N heartbeats within a 60-second sliding window mark
+        # the task as storming. A storming task's heartbeats no longer count as a liveness signal —
+        # the task is treated as if it had no heartbeat and is reclaimed after
+        # ``dispatch_stale_timeout_seconds`` like any other inactive task. 0 = off.
+        "heartbeat_storm_threshold": 10,
         # Each tick, requeue 'running' cards with broken claim bookkeeping (claim_lock or
         # claim_expires NULL with a dead worker) that TTL/crash/stale recovery can't see. False
         # keeps orphans frozen for manual forensics.
