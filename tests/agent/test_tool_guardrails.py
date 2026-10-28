@@ -86,6 +86,35 @@ def test_non_interactive_hard_stop_can_be_disabled_explicitly():
     assert cfg.non_interactive_hard_stop_enabled is False
 
 
+def test_dispatcher_owned_worker_hard_stops_even_on_the_cli_platform(monkeypatch):
+    """A board worker is unattended: it is spawned as ``--cli``, but no human can
+    break its tool loop, so an identical-call loop must halt instead of warn."""
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_012d84c3")
+
+    cfg = ToolCallGuardrailConfig.from_mapping({}, platform="cli")
+
+    assert cfg.hard_stop_enabled is True
+
+
+def test_dispatcher_owned_worker_respects_an_explicit_opt_out(monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_012d84c3")
+
+    cfg = ToolCallGuardrailConfig.from_mapping(
+        {"non_interactive_hard_stop_enabled": False},
+        platform="cli",
+    )
+
+    assert cfg.hard_stop_enabled is False
+
+
+def test_non_worker_cli_platform_keeps_the_warn_only_default(monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+
+    cfg = ToolCallGuardrailConfig.from_mapping({}, platform="cli")
+
+    assert cfg.hard_stop_enabled is False
+
+
 def test_default_repeated_identical_failed_call_warns_without_blocking():
     controller = ToolCallGuardrailController()
     args = {"query": "same"}

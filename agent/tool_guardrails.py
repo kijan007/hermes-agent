@@ -90,8 +90,31 @@ def is_stall_guard_repeatable(tool_name: str) -> bool:
     return tool_name in STALL_GUARD_REPEATABLE_TOOLS or tool_name.endswith(_STALL_GUARD_REPEATABLE_SUFFIXES)
 
 
+def _is_dispatcher_owned_worker() -> bool:
+    """True when this process is a board worker the dispatcher owns.
+
+    The dispatcher sets ``HERMES_KANBAN_TASK`` for every worker it spawns, so the
+    env var is the authoritative "unattended" marker. Read it directly instead of
+    importing ``agent.delegation_context`` (which imports from this module's
+    package) to keep the import graph acyclic.
+    """
+    import os
+
+    return bool((os.environ.get("HERMES_KANBAN_TASK") or "").strip())
+
+
 def _is_non_interactive_platform(platform: str | None) -> bool:
-    """True for gateway/cron sessions where tool loops are unattended."""
+    """True for gateway/cron sessions where tool loops are unattended.
+
+    A dispatcher-owned kanban worker is unattended too, whatever platform it was
+    spawned on: the board spawns it as ``hermes --cli chat -q`` ("cli" is an
+    ATTENDED platform), but no human can intervene in its tool loop — only the
+    flow guard can reclaim it. A worker that re-reads the same unreadable task
+    body therefore burns its whole runtime budget in a warn-only loop instead of
+    failing fast, so treat it as non-interactive.
+    """
+    if _is_dispatcher_owned_worker():
+        return True
     if not isinstance(platform, str) or not platform.strip():
         return False
     return platform.strip().lower() not in _ATTENDED_PLATFORMS
