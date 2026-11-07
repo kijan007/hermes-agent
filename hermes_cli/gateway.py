@@ -4844,7 +4844,7 @@ def _dispatch_via_service_manager_if_s6(action: str, profile: str | None = None)
             getattr(mgr, action)(service)
         except GatewayNotRegisteredError:
             # A profile created from the HOST against a bind-mounted home has a directory but no
-            # slot (`profile create` cannot reach the container's /run/service). Only `start`
+            # slot (`profile create` cannot reach the container's /run/hermes-service). Only `start`
             # repairs that; stop/restart on a missing slot stay an error.
             if action != "start" or not register_unregistered_profile_gateway(mgr, profile):
                 raise
@@ -5667,24 +5667,3 @@ def _gateway_command_inner(args):
     handler = _GATEWAY_SUBCOMMANDS.get(getattr(args, "gateway_command", None))
     if handler is not None:
         handler(args)
-
-
-def _pm_runtime_venv_dir(project_root: Path | None = None) -> Path | None:
-    """The venv pm provisioned for this install, resolved through
-    ``runtime_paths.selected_venv`` — the committed-environment contract —
-    never from interpreter state.
-
-    Under no-boot-through-venv the gateway runs the store python with the
-    venv's site-packages on PYTHONPATH, so ``sys.prefix`` always equals
-    ``sys.base_prefix`` and ``VIRTUAL_ENV`` is unset in bundled installs;
-    prefix/env probing silently degrades. Resolution follows the committed-
-    environment contract: a committed selection is returned as-is, a host
-    with nothing committed yields nothing launchable, and a malformed
-    selection raises — fail closed, never a silently wrong venv.
-    """
-    root = Path(project_root) if project_root is not None else PROJECT_ROOT
-    from pm.environments import selected_venv
-
-    venv = selected_venv(root)  # a malformed committed selection raises: fail closed
-    return venv if venv.is_dir() else None
-

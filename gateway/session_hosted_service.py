@@ -4,7 +4,7 @@ import hashlib
 from contextlib import nullcontext
 from pathlib import Path
 
-from gateway.session_contract import Principal
+from gateway.session_contract import SessionActor
 from gateway.session_authorities import active_authority, all_authorities, owner_scope, serving_authorities
 from gateway.session_hosted_controls import HostedControls
 from gateway.owner_identity import same_owner
@@ -12,6 +12,16 @@ from hermes_state_runtime import RuntimeStoreError, _epoch
 from tui_gateway.hosted_room_service import HostedRoomService
 
 _OWNER = 'gateway.hosted.owner.v1:'
+# What the Stop of an attempt asks its admitting home after the profile moved: never create, submit or approve.
+_STOP_READS = frozenset({'resolve_exact', 'resume', 'info', 'interrupt', 'history', 'results', 'discard'})
+
+
+def probe_native_room_owner(db_path, *, room_id) -> bool:
+    """Non-blocking, read-only: does the gateway owning this session store serve ``room_id``? Only rooms
+    with an owner entry are in ``CanonicalHostedRoomService.bindings``."""
+    from gateway.hosted_rooms import _probe
+    return _probe(Path(db_path), 'state_meta', 'SELECT 1 FROM state_meta WHERE key=? LIMIT 1',
+                  (_OWNER + str(room_id),), 'native room ownership is temporarily unavailable')
 
 
 class CanonicalHostedRoomService(HostedControls, HostedRoomService):
@@ -54,7 +64,13 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
                    and m.get('target', {}).get('kind', 'local') == 'local' for m in room['members']):
             raise RuntimeStoreError('permission_denied')
         target_home = self.profile_homes().get(profile)
-        if target_home is None or params.get('_target_home') != str(target_home):
+        claimed = params.get('_target_home')
+        if (operation in _STOP_READS and claimed != str(target_home)
+                and claimed in self._stopping_attempt_homes(room_id, member, params.get('expected_task_id'))):
+            # The home that admitted a stopping attempt still answers for it; so does every home
+            # a turn from before attempt homes were recorded may have been admitted at.
+            target_home = claimed
+        if target_home is None or claimed != str(target_home):
             raise RuntimeStoreError('permission_denied')
         result = {'owner': owner, 'target_home': str(target_home)}
         if operation in {'submit', 'execute', 'attachment'}:
@@ -71,6 +87,10 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
                            and t['payload'].get('attachments', []) == (params.get('attachments') or [])))]
             if len(matches) != 1:
                 raise RuntimeStoreError('permission_denied')
+            if operation == 'submit':
+                from gateway.session_hosted_member_homes import record_attempt_home
+                record_attempt_home(self.authority.db, room_id, member, matches[0]['identity'].task_id,
+                                    matches[0]['execution_generation'], target_home)
             payload = matches[0]['payload']
             if operation == 'attachment':
                 # Bytes only: the prompt/manifest already attested for the submit would
@@ -134,10 +154,18 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
         member = str(payload.get('target_member_id') or payload.get('target_profile'))
         profile = payload['target_profile']
         owner = self._owner(binding.room_id)
-        home = self.profile_homes().get(profile)
+        from gateway.session_hosted_member_homes import stopping_attempt_home
+        # A Stop is asked where its attempt was admitted, wherever the profile points now.
+        home = (stopping_attempt_home(self.authority.db, binding.room_id, member, task)
+                or self.profile_homes().get(profile))
         if home is None:
             raise RuntimeStoreError('permission_denied')
         key = binding.room_id, member, profile, owner, str(home)
+        if home != Path(self.authority.profile_id):
+            from gateway.session_hosted_member_homes import record_member_home
+            # Every resolve, not only a new transport: a profile re-added to hosted_rooms.profiles
+            # reuses its cached transport, and its home must still be recorded.
+            record_member_home(self.authority.db, binding.room_id, member, home)
         if key not in self.member_rpcs:
             if home != Path(self.authority.profile_id):
                 from gateway.session_hosted_transport import HostedRoomOwnerRPC
@@ -192,13 +220,35 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
                 if not authorized(conn, 'submit', identity, generation):
                     raise RuntimeStoreError('permission_denied')
                 return True
-            principal = Principal(owner, self.authority.profile_id,
+            principal = SessionActor(owner, self.authority.profile_id,
                 frozenset({'session:create', 'session:read', 'session:submit', 'session:control', 'session:approve'}),
                 'hosted:' + binding.room_id + ':' + member)
             self.member_rpcs[key] = HostedRoomAuthorityRPC(self.authority, self.loop,
                 room_id=binding.room_id, member_id=member, profile=profile, principal=principal, authorize=authorize,
                 authorize_write=authorize_write)
         return self.member_rpcs[key]
+
+    def _stopping_attempt_homes(self, room_id, member, task_id=None):
+        from gateway.session_hosted_member_homes import legacy_stop_homes, stopping_attempt_homes
+        db = self.authority.db
+        return stopping_attempt_homes(db, room_id, member) | legacy_stop_homes(db, room_id, member, task_id)
+
+    def _stop_pending_refusal(self, room_id, deferred):
+        """Name an unconfigured member profile whose unknown home keeps a turn deferred."""
+        from gateway.session_hosted_member_homes import unknown_home_refusal
+        from tui_gateway.hosted_room_service import task_member_id
+        return unknown_home_refusal(self, room_id, [
+            task for task in deferred if not self._member_is_peer(room_id, task_member_id(task))])
+
+    def _stop_deferred_peer(self, room_id, task):
+        """Also settle a local member's deferred turn once its profile is no longer served here and
+        nothing on this host can run it (``unserved_member_stopped``): its daemon never answers."""
+        from gateway.session_hosted_member_homes import unsettled_legacy_homes, unserved_member_stopped
+        if super()._stop_deferred_peer(room_id, task):
+            return not unsettled_legacy_homes(self, room_id, task)
+        from tui_gateway.hosted_room_service import task_member_id
+        return (not self._member_is_peer(room_id, task_member_id(task))
+                and unserved_member_stopped(self, room_id, task))
 
     def check_admission(self, ref, row):
         """Reconstruct the private producer from durable task state before claim."""
