@@ -25,13 +25,13 @@ from scripts.code_health.config import ENFORCEMENT
 REPO = Path(__file__).resolve().parents[2]
 _GUARD_SCRIPTS = (
     "scripts/check-windows-footguns.py", "scripts/check_bash_shebangs.py",
-    "scripts/check_no_tmp_literals.py", "scripts/check_detached_spawns.py",
+    "scripts/check_no_tmp_literals.py", "scripts/check_detached_spawns.py", "scripts/install_root_lint.py",
     "scripts/check_config_yaml_writers.py", "scripts/check_config_yaml_readers.py",
-    "scripts/ci/check_os_marker_fakes.py", "scripts/check-case-collisions.py",
+    "scripts/check_profile_create_entry.py", "scripts/ci/check_os_marker_fakes.py", "scripts/check-case-collisions.py",
     "scripts/ci/check_lazy_deps_imports.py", "scripts/ci/check_profile_archive_boundary.py",
-    "scripts/ci/check_agents_md_size.py", "scripts/ci/check_blob_size.py",
+    "scripts/ci/check_agents_md_size.py", "scripts/ci/check_blob_size.py", "scripts/ci/check_line_endings.py",
 )
-_SUPPORT = ("scripts/ci/profile_scope_patterns.json", "agent/subdirectory_hints.py", *_GUARD_SCRIPTS)
+_SUPPORT = ("scripts/ci/profile_scope_patterns.json", "scripts/install_root_lint_baseline.json", "agent/subdirectory_hints.py", *_GUARD_SCRIPTS)
 # The config guards fail when a tree they scan is missing, so the fixture carries an empty stand-in.
 _SCANNED_TREES = sorted({*check_config_yaml_readers.DEFAULT_TREES, *check_config_yaml_writers.DEFAULT_TREES})
 _LEGACY = "def legacy(x):\n" + "".join(f"    if x == {i}:\n        return {i}\n" for i in range(21))
@@ -389,6 +389,7 @@ def test_hooks_run_with_msys_path_conversion_disabled(tmp_path):
     ("lazy-deps", {"pkg/uses.py": "import tools.lazy_deps\n"}),
     ("profile-archives", {"pkg/export.tar.gz": "not really\n"}),
     ("blob-size", {"pkg/shot.png": "\0" * (600 * 1024)}),
+    ("line-endings", {"pkg/entry.yaml": "name: x\r\nsha: y\r\n"}),
 ])
 def test_ci_only_guards_run_in_scripts_check(tmp_path, job, files):
     repo = _engine_repo(tmp_path)

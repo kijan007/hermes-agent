@@ -66,20 +66,28 @@ def _merged_platform_block(home: Path, name: str) -> Optional[dict]:
     gw_data = config_loader.load_legacy_gateway_json(home)
     gw_data = gw_data if isinstance(gw_data, dict) else {}
     try:
+        from hermes_cli import managed_scope
         yaml_cfg = config_loader.read_yaml_layers(home)
+        managed = managed_scope.apply_managed_overlay({})
     except Exception:  # malformed config.yaml: the gateway falls back to gateway.json alone too
         logger.debug("left-core: unreadable config for %s", home, exc_info=True)
-        yaml_cfg = {}
+        yaml_cfg, managed = {}, {}
     yaml_cfg = yaml_cfg if isinstance(yaml_cfg, dict) else {}
-    block = config_loader.merge_platform_sections(
-        yaml_cfg, yaml_cfg.get("gateway"), gw_data, also=frozenset({name})).get(name)
+    platforms = config_loader.merge_platform_sections(
+        yaml_cfg, yaml_cfg.get("gateway"), gw_data, also=frozenset({name}))
+    authored = config_loader.snapshot_authored_extra(config_loader.merge_platform_sections(
+        yaml_cfg, yaml_cfg.get("gateway"), {}, also=frozenset({name})))
+    # Reconcile cross-shape pins before the root bridge, even before this platform is registered.
+    managed["platforms"] = config_loader.merge_platform_sections(
+        managed, managed.get("gateway"), {}, also=frozenset({name}))
+    config_loader._apply_managed_extra(authored, managed, platforms)
+    block = platforms.get(name)
     root = yaml_cfg.get(name)
     if isinstance(root, dict):  # a top-level ``<name>:`` block, bridged as bridge_platform_shared_keys does: its
         from gateway.config import PlatformConfig  # adapter keys beat gateway.json's extra, not config.yaml's nested one
-        authored = config_loader.merge_platform_sections(yaml_cfg, yaml_cfg.get("gateway"), {}, also=frozenset({name}))
         block = dict(block) if isinstance(block, dict) else {}
         block["extra"] = {**(block.get("extra") or {}), **PlatformConfig.from_dict({**root, "home_channel": None}).extra,
-                          **(authored.get(name) or {}).get("extra", {})}  # a home_channel names a plugin's Platform
+                          **authored.get(name, {})}  # a home_channel names a plugin's Platform
         if "enabled" in root:  # and its enabled wins
             block["enabled"] = root["enabled"]
     return block if isinstance(block, dict) else None
@@ -842,11 +850,12 @@ def installs_held():
         _installs_held.reset(token)
 
 
-def defer_startup_notice(message: str) -> None:
+def defer_startup_notice(message: str, *, log: bool = True) -> None:
     """Hand *message* to the active home's next turn someone sees (:func:`claim_kept_notices`), once.
-    For boot-path work that runs before any agent exists."""
+    For boot-path work that runs before any agent exists. *log* False: the caller already logged it."""
     from hermes_constants import get_hermes_home
-    logger.warning(message)
+    if log:
+        logger.warning(message)
     _queue_notice(Path(get_hermes_home()), message)
 
 
@@ -1133,11 +1142,14 @@ def _noticed(message: str, home: Path, feature: LeftCoreFeature, process_env: bo
 
 
 def _install_into(home: Path, *, consent: Optional[bool] = None) -> Callable[[str], dict]:
-    def _install(name: str) -> dict:
+    def _install(name: str, discard: Optional[Path] = None) -> dict:
         from hermes_cli.plugins_cmd import dashboard_install_plugin
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
         token = set_hermes_home_override(home)
         try:
+            if discard is not None:  # the caller's own leftover tree, removed under this same binding
+                from hermes_cli.plugins_cmd_remove import _remove_plugin_core
+                _remove_plugin_core(discard)
             return dashboard_install_plugin("", force=False, enable=True, catalog_name=name,
                                             assume_deps_consent=_unattended_consent() if consent is None
                                             else consent)

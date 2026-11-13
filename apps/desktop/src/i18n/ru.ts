@@ -27,6 +27,11 @@ import { ruThemePicker } from './ru_theme_picker'
 import { ruUpdateChannel } from './ru_update_channel'
 
 export const ruOverrides = {
+  gatewayGroupOpen: {
+    opening: "Открываем групповой чат…",
+    lookupFailed: "Не удалось найти эту группу на шлюзе. Попробуйте ещё раз.",
+    missing: "Этот групповой чат больше не существует."
+  },
   catalog: ruCatalog,
   connectors: ruConnectors.connectors,
   sharedMetrics: ruSharedMetrics,
@@ -931,7 +936,10 @@ export const ruOverrides = {
       attachmentSizeLabel: 'Макс. размер превью / загрузки изображений в мегабайтах',
       voiceShortcutHintTitle: 'Горячая клавиша записи голоса',
       voiceShortcutHintDesc:
-        'Настройте горячую клавишу записи голоса в разделе «Настройки → Горячие клавиши» («Начать / остановить голосовой диалог»). Параметр voice.record_key действует только в CLI и TUI.'
+        'Настройте горячую клавишу записи голоса в разделе «Настройки → Горячие клавиши» («Начать / остановить голосовой диалог»). Параметр voice.record_key действует только в CLI и TUI.',
+      desktopReadAloudTitle: 'Зачитывать ответы в этом приложении',
+      desktopReadAloudDesc:
+        'Зачитывает каждый готовый ответ в Desktop. Тот же переключатель, что и в поле ввода; действует во всех открытых окнах, а выключение останавливает ответ на полуслове. «Зачитывать ответы вслух» ниже относится к мессенджерам и CLI.'
     },
     hudModifier: {
       title: 'Вызов HUD коротким нажатием',
@@ -1336,6 +1344,13 @@ export const ruOverrides = {
       clearDirFailed: 'Не удалось очистить папку по умолчанию'
     },
     toolsets: {
+      browserRealProfile: {
+        reimportSignins: 'Импортировать входы заново',
+        signinsImportedTitle: 'Входы во встроенном браузере',
+        signinsImported: count => `Встроенный браузер вошёл с cookie из профиля браузера: ${count}.`,
+        signinsRemote: 'Этот бэкенд работает на другом компьютере, поэтому его профиль браузера не импортируется во встроенный браузер.',
+        signinsFailed: 'Не удалось импортировать входы во встроенный браузер',
+      },
       loadingConfig: 'Загрузка конфигурации',
       savedTitle: 'Учётные данные сохранены',
       savedMessage: key => `${key} обновлён.`,

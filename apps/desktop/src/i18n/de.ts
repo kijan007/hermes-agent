@@ -29,6 +29,11 @@ import { defineLocale, type TranslationOverrides } from './define-locale'
 import { introDe } from './intro-de'
 
 export const deOverrides = {
+  gatewayGroupOpen: {
+    opening: "Gruppenchat wird geöffnet…",
+    lookupFailed: "Diese Gruppe konnte auf dem Gateway nicht gefunden werden. Versuche es erneut.",
+    missing: "Dieser Gruppenchat existiert nicht mehr."
+  },
   sharedMetrics: deSharedMetrics,
   firstRun: deFirstRun,
   intro: introDe,
@@ -1541,6 +1546,9 @@ export const deOverrides = {
         'Wie groß eine lokale Datei sein darf, die Desktop für Vorschauen und Bildanhänge lädt, in MB. Standard ist 16. Remote-Anhänge ohne Bild verwenden ein eigenes Limit von 256 MB. Ein sehr hoher Wert lädt die gesamte Datei in den Speicher, was die App einfrieren oder abstürzen lassen kann.',
       attachmentSizeUnit: 'MB',
       attachmentSizeLabel: 'Maximale Vorschau-/Bildladegröße in Megabyte',
+      desktopReadAloudTitle: 'Antworten in dieser App vorlesen',
+      desktopReadAloudDesc:
+        'Liest jede fertige Antwort in Desktop vor. Derselbe Schalter wie im Eingabefeld; er gilt für alle offenen Fenster, und Ausschalten stoppt eine Antwort mitten im Satz. „Antworten vorlesen“ unten gilt für Messaging und die CLI.',
       showOptions: 'Optionen anzeigen'
     },
     hudModifier: {
@@ -2387,15 +2395,20 @@ export const deOverrides = {
       browserRealProfile: {
         label: 'Mein echtes Browser-Profil verwenden',
         description:
-          'Kopiert die Anmeldungen und Cookies Ihres Standardbrowsers in einen verwalteten Schnappschuss, mit dem der Agent browst. Ihr Live-Profil wird nie direkt geöffnet. Gilt für neue Sessions.',
+          'Kopiert die Anmeldungen und Cookies Ihres Standardbrowsers in einen verwalteten Schnappschuss, mit dem der Agent browst, und meldet auch den In-App-Browser damit an. Ihr Live-Profil wird nie direkt geöffnet. Gilt für neue Sessions.',
         enabledTitle: 'Echtes Profil-Browsen aktiv',
         enabledMessage: 'Neue Sessions browsen mit einem Schnappschuss Ihres Standard-Browserprofils.',
         disabledTitle: 'Echtes Profil-Browsen deaktiviert',
-        disabledMessage: 'Der Profil-Schnappschuss wird gelöscht; neue Sessions verwenden einen sauberen Browser.',
+        disabledMessage: 'Der Profil-Schnappschuss wird gelöscht und der In-App-Browser davon abgemeldet; neue Sessions verwenden einen sauberen Browser.',
         failedSave: 'Die Echtes-Profil-Einstellung konnte nicht gespeichert werden',
+        reimportSignins: 'Anmeldungen erneut importieren',
+        signinsImportedTitle: 'Anmeldungen im In-App-Browser',
+        signinsImported: count => `In-App-Browser mit ${count} Cookie${count === 1 ? '' : 's'} aus Ihrem Browserprofil angemeldet.`,
+        signinsRemote: 'Dieses Backend läuft auf einem anderen Rechner, daher wird sein Browserprofil nicht in den In-App-Browser importiert.',
+        signinsFailed: 'Anmeldungen konnten nicht in den In-App-Browser importiert werden',
         prompt: {
           title: 'Auf Ihren Websites angemeldet bleiben',
-          body: 'Lassen Sie Hermes mit einem Schnappschuss Ihres Standard-Browserprofils browsen, damit Websites bereits angemeldet öffnen.',
+          body: 'Lassen Sie Hermes mit einem Schnappschuss Ihres Standard-Browserprofils browsen, damit Websites bereits angemeldet öffnen, für den Agenten und im In-App-Browser.',
           bulletSnapshot: 'Cookies und Anmeldungen werden in einen verwalteten Schnappschuss kopiert.',
           bulletLiveProfile: 'Ihr Live-Browserprofil wird nie direkt geöffnet.',
           bulletLocal: 'Nichts verlässt diesen Computer.',

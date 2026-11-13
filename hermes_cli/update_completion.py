@@ -9,6 +9,7 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import runpy
 import signal
 from pathlib import Path
 import subprocess
@@ -323,6 +324,7 @@ def _prepare(request: dict, request_path: Path, result_path: Path) -> int:
     from pm import receipt
     from pm.client import ensure_tools_for_sync
     from pm.environments import activation_environment, project_python
+    from pm.extras import first_generation_selection
 
     root = Path(request["source"])
     update_id = request["receipt"]["update_id"]
@@ -350,8 +352,10 @@ def _prepare(request: dict, request_path: Path, result_path: Path) -> int:
             # This file runs from the new tree, so its lockfile carries the new
             # pins; tools (incl. bumped uv/python) land before the sync uses them.
             ensure_tools_for_sync()
-            # An update never fails because of a plugin: misfits are disabled and reported.
-            pm.sync_venv(explicit=True, project_root=root, evict_incompatible_plugins=True)
+            # An update never fails because of a plugin: misfits are disabled and reported. A
+            # pre-PM tree that reached this code with no recorded selection carries its old venv.
+            pm.sync_venv(first_generation_selection(root), explicit=True, project_root=root,
+                         evict_incompatible_plugins=True)
             collect_superseded_generations(root)
         finally:
             request["pm_receipt"] = receipt.last_for_update(update_id)
@@ -562,7 +566,8 @@ def main() -> int:
     request = json.loads(request_path.read_text(encoding="utf-8-sig"))
     if request["schema"] != 1:
         raise ValueError("unsupported source completion request")
-    root = Path(__file__).resolve().parents[1]
+    # -I -S keeps the checkout off sys.path, so the install-root owner is run from its file.
+    root = Path(runpy.run_path(str(Path(__file__).with_name("_startup_fast.py")))["project_root_str"]())
     if root != Path(request["source"]).resolve():
         raise ValueError("completion checkout does not match request")
     # -I deliberately ignores inherited PYTHONPATH during PM preparation.
