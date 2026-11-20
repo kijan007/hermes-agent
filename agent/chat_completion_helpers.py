@@ -282,10 +282,28 @@ def _is_provider_stream_empty_frame_error(exc: BaseException) -> bool:
     return isinstance(error_obj, dict) and error_obj.get("code") == PROVIDER_STREAM_EMPTY_FRAME_ERROR_CODE
 
 
-def _iter_provider_stream_chunks(stream, *, response: Any = None):
-    """Yield SDK chunks while translating SDK-level SSE decode failures."""
+def _iter_provider_stream_chunks(stream, *, response: Any = None,
+                                 wall_clock_deadline: Optional[float] = None,
+                                 deadline_seconds: Optional[float] = None):
+    """Yield SDK chunks while translating SDK-level SSE decode failures.
+
+    ``wall_clock_deadline`` is a ``time.monotonic()`` ceiling for the whole call. Unlike
+    the httpx read timeout — which only covers *idle gaps* and lets a prefill that keeps
+    trickling chunks run indefinitely (run 61896: one call blocked 3885s with chunks
+    flowing) — this fires on the first chunk after the deadline even mid-flow, aborting
+    the call instead of letting it finish (t_7bb26ba4). Checked once per chunk, so the
+    abort latency is one chunk.
+    """
     try:
-        yield from stream
+        for chunk in stream:
+            if wall_clock_deadline is not None and time.monotonic() > wall_clock_deadline:
+                raise TimeoutError(
+                    f"API call exceeded its {deadline_seconds:.0f}s wall-clock deadline "
+                    "while chunks were still arriving; aborted instead of running on "
+                    "(set providers.<id>.request_timeout_seconds or HERMES_API_CALL_DEADLINE "
+                    "to adjust)."
+                )
+            yield chunk
     except json.JSONDecodeError as error:
         stream_response = response() if callable(response) else response
         if stream_response is None:
@@ -2897,6 +2915,31 @@ class _StreamingCall(StreamingWaitMonitor):
             logger.debug("Cloud reasoning stream — read timeout raised to %.0fs to match stale-stream detector", read)
         return base, read, 30.0
 
+    def _api_call_deadline_seconds(self) -> Optional[float]:
+        """Hard wall-clock ceiling for ONE API call, independent of chunk flow.
+
+        The httpx read timeout from ``_stream_timeouts`` only bounds *idle gaps*: a
+        prefill that keeps trickling chunks runs forever (run 61896: one call blocked
+        3885s with 0% cache read while the worker stayed alive). This ceiling fires on
+        the first chunk after it elapses even mid-flow (see
+        ``_iter_provider_stream_chunks``) and aborts the call instead of letting it run
+        on (t_7bb26ba4).
+
+        The ceiling is the EXPLICITLY configured request timeout — the provider value
+        (now also resolved for the ``custom`` / ``custom:<name>`` runtime ids, see
+        hermes_cli.timeouts) or ``HERMES_API_REQUEST_TIMEOUT`` — so providers without a
+        configured value keep the old idle-only behavior. ``HERMES_API_CALL_DEADLINE``
+        overrides both.
+        """
+        override = env_float("HERMES_API_CALL_DEADLINE")
+        if override is not None and override > 0:
+            return override
+        timeout = get_provider_request_timeout(self.agent.provider, self.agent.model)
+        if timeout is not None and timeout > 0:
+            return timeout
+        env_timeout = env_float("HERMES_API_REQUEST_TIMEOUT")
+        return env_timeout if env_timeout is not None and env_timeout > 0 else None
+
     @staticmethod
     def _choiceless_chunk(chunk, finish_reason):
         """Chunk with empty ``choices`` -> ``(usage, finish_reason)``. Raises
@@ -3003,6 +3046,10 @@ class _StreamingCall(StreamingWaitMonitor):
         """Stream a chat completions response."""
         import httpx as _httpx
         base_timeout, read_timeout, conn_cap = self._stream_timeouts()
+        # Wall-clock ceiling for this whole call (connect + prefill + streaming),
+        # stamped BEFORE the stream opens so a trickling prefill is covered too.
+        _deadline_s = self._api_call_deadline_seconds()
+        _deadline_at = time.monotonic() + _deadline_s if _deadline_s is not None else None
         content_parts: list = []
         reasoning_parts: list = []
         # Live-display accumulator for detail-derived reasoning text: de-gluing must
@@ -3071,7 +3118,9 @@ class _StreamingCall(StreamingWaitMonitor):
                 if self._attempt_request_client is not None:
                     self.agent._abort_request_openai_client(self._attempt_request_client, reason=reason)
 
-        for chunk in _iter_provider_stream_chunks(stream, response=lambda: self._attempt_stream_response):
+        for chunk in _iter_provider_stream_chunks(stream, response=lambda: self._attempt_stream_response,
+                                                  wall_clock_deadline=_deadline_at,
+                                                  deadline_seconds=_deadline_s):
             is_progress = self._take_chunk(_diag, chunk, llamacpp)
             if self.agent._interrupt_requested:
                 _close_half_read_stream("interrupt_stream_close_failed")
