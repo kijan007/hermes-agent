@@ -399,6 +399,23 @@ class ToolCallGuardrailController:
     def halt_decision(self) -> ToolGuardrailDecision | None:
         return self._halt_decision
 
+    def release_halt(
+        self, *, only_codes: frozenset[str] | set[str] | tuple[str, ...] | None = None,
+    ) -> "ToolGuardrailDecision | None":
+        """Clear a recorded turn halt so the runtime can keep looping toward a terminal
+        board call instead of ending the turn (kanban stop-guard).
+
+        Returns the released decision (or ``None``). ``only_codes`` restricts release to
+        the given decision codes (default: any): the stall/repetition halts are
+        recoverable-by-redirect, while caller-initiated ``block`` decisions (loop caps,
+        repeated-exact-failure) must still end the turn.
+        """
+        released = self._halt_decision
+        if released is None or (only_codes is not None and released.code not in only_codes):
+            return None
+        self._halt_decision = None
+        return released
+
     def _decide(
         self, action: str, code: str, tool_name: str, count: int, signature: ToolCallSignature,
         *, message: str | None = None, **fmt: Any,
