@@ -839,6 +839,11 @@ def finalize_turn(
     }
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
+    elif getattr(agent, "_guardrail_halt_released", None) is not None:
+        # The halt was released into a terminal kanban_block redirect (M2a): the turn ends
+        # normally (blocked via the board call), but the guardrail cause stays reportable.
+        result["guardrail"] = agent._guardrail_halt_released.to_metadata()
+        result["guardrail_redirect"] = "kanban_block"
     # Persistence failures already set failed=True; also stamp `error` so the gateway
     # surfaces status="error" (desktop can toast) instead of a quiet complete frame, plus
     # the machine-readable cause 'session_persistence_failed:<locked|compression|...>'.
