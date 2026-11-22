@@ -289,17 +289,19 @@ _DECISION_MESSAGES: dict[str, str] = {
 }
 
 _IDENTICAL_CALL_NOTICE = (
-    "[hermes note: this is the {ordinal} consecutive identical call to "
+    "[hermes note: WARNING (not a stop — execution continues): this is the {ordinal} "
+    "consecutive identical call to "
     "{tool_name} with identical arguments returning the same result. "
-    "Do not repeat it — change arguments, use a different tool, or "
-    "proceed with what you have.]"
+    "Do not repeat the call unchanged — change arguments, use a different tool, or "
+    "proceed with the result you already have.]"
 )
 
 _IDENTICAL_CYCLE_NOTICE = (
-    "[hermes note: the last {count} rounds repeated the same cycle of {period} tool calls "
+    "[hermes note: WARNING (not a stop — execution continues): the last {count} rounds repeated "
+    "the same cycle of {period} tool calls "
     "(ending with {tool_name}) with identical arguments and identical results. "
-    "Do not repeat the batch — change arguments, use a different tool, or "
-    "proceed with what you have.]"
+    "Do not repeat the batch unchanged — change arguments, use a different tool, or "
+    "proceed with the results you already have.]"
 )
 
 # tool -> (LoopCapConfig field, controller counter attribute, decision code)
