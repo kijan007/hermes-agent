@@ -14,6 +14,21 @@ from typing import Any, Iterable, Optional
 from agent.delegation_context import owned_kanban_task
 
 
+# Guardrail halt codes the stop-guard may redirect into a terminal ``kanban_block``
+# call (Weg a of the M2 turn-exit contract): the loop hit a no-progress wall, so the
+# worker's next move is hand the card back blocked — not more tool calls. Caller-block
+# decisions (loop caps, repeated-exact-failure) keep ending the turn.
+_GUARDRAIL_HALT_REDIRECT_CODES = frozenset({
+    "identical_call_streak_halt",
+    "identical_cycle_halt",
+    "same_tool_failure_halt",
+})
+
+# One redirect attempt per turn: if the worker ignores the kanban_block instruction, the
+# ordinary kanban stop-guard (bounded nudges) and the dispatcher's violation budget own it.
+_GUARDRAIL_HALT_REDIRECT_MAX_ATTEMPTS = 1
+
+
 # Every tool that ends this worker's responsibility for the card, not just the two that
 # close it out: ``kanban_request_review`` moves it to ``review`` (goals.py's continuation /
 # finalize prompts tell builders to call it) and ``kanban_request_changes`` returns it to
@@ -98,4 +113,45 @@ def build_kanban_stop_nudge(
     )
 
 
-__all__ = ["build_kanban_stop_nudge", "kanban_stop_nudge_enabled", "session_called_kanban_terminal"]
+def guardrail_halt_redirect_enabled(
+    messages: Iterable[dict] | None, attempts: int, *, max_attempts: int = _GUARDRAIL_HALT_REDIRECT_MAX_ATTEMPTS,
+) -> bool:
+    """True when a guardrail halt may be redirected into a ``kanban_block`` call: a
+    dispatcher-owned kanban worker with no terminal board call yet and redirect budget left."""
+    if (
+        not kanban_stop_nudge_enabled()
+        or attempts >= max_attempts
+        or session_called_kanban_terminal(messages)
+    ):
+        return False
+    return True
+
+
+def build_guardrail_halt_block_nudge(decision: Any, *, task_id: Optional[str] = None) -> str:
+    """Worker instruction appended after a guardrail halt: end the turn with a terminal
+    ``kanban_block`` call instead of letting the process exit without one (which the
+    dispatcher books as ``protocol_violation``). ``decision`` is the halt decision
+    (``code`` / ``tool_name`` / ``count`` attributes)."""
+    tid = (task_id or os.environ.get("HERMES_KANBAN_TASK") or "").strip() or "this task"
+    code = getattr(decision, "code", "") or "guardrail_halt"
+    tool = getattr(decision, "tool_name", "") or "the same tool"
+    count = getattr(decision, "count", 0)
+    return (
+        "[System: You are a Hermes kanban worker. A tool-loop guardrail just halted your turn "
+        f"(`{code}`: `{tool}` ran {count} times without progress), but the board still shows the "
+        "task as `running`. A plain-text reply is NOT a terminal state — ending now books a "
+        "protocol violation.\n\n"
+        "Do this immediately in your next response — do not narrate intent:\n"
+        "Call `kanban_block(reason=\"Guardrail-Halt: " + code + "\", kind=\"transient\")` so the "
+        f"task `{tid}` ends as blocked. Do not retry the halted tool call and do not start new "
+        "work first.]"
+    )
+
+
+__all__ = [
+    "build_kanban_stop_nudge",
+    "build_guardrail_halt_block_nudge",
+    "guardrail_halt_redirect_enabled",
+    "kanban_stop_nudge_enabled",
+    "session_called_kanban_terminal",
+]

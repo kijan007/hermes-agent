@@ -183,6 +183,41 @@ def run_tool_round(
 
     if agent._tool_guardrail_halt_decision is not None:
         decision = agent._tool_guardrail_halt_decision
+        # Kanban redirect (M2a): a guardrail halt on a dispatcher-owned worker must end the
+        # turn as ``blocked`` via a terminal ``kanban_block`` call, not as a narrated stop
+        # (which the dispatcher books ``protocol_violation``). Release the halt, tell the
+        # worker to block, and keep the turn alive so the board call can land.
+        from agent.kanban_stop import (
+            _GUARDRAIL_HALT_REDIRECT_CODES,
+            build_guardrail_halt_block_nudge,
+            guardrail_halt_redirect_enabled,
+        )
+
+        _redirect = (
+            decision.code in _GUARDRAIL_HALT_REDIRECT_CODES
+            and guardrail_halt_redirect_enabled(messages, getattr(agent, "_guardrail_halt_redirects", 0))
+        )
+        if _redirect:
+            agent._guardrail_halt_redirects = getattr(agent, "_guardrail_halt_redirects", 0) + 1
+            # Move the halt aside (controller + agent copy) so the next round is not
+            # re-halted before it can run; the released decision stays reportable.
+            agent._tool_guardrails.release_halt(only_codes=_GUARDRAIL_HALT_REDIRECT_CODES)
+            agent._guardrail_halt_released = decision
+            agent._tool_guardrail_halt_decision = None
+            agent._emit_diagnostic_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code} — redirecting to kanban_block")
+            append_message(messages, {
+                "role": "assistant",
+                "content": agent._toolguard_controlled_halt_response(decision),
+            })
+            agent._guardrail_block_nudge = build_guardrail_halt_block_nudge(decision)
+            append_message(messages, {
+                "role": "user",
+                "content": agent._guardrail_block_nudge,
+                "_kanban_stop_synthetic": True,
+            })
+            agent._session_messages = messages
+            return _verdict("continue")
+
         _turn_exit_reason = "guardrail_halt"
         final_response = agent._toolguard_controlled_halt_response(decision)
         agent._emit_diagnostic_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}")
