@@ -10,6 +10,7 @@ from agent.tool_guardrails import (
     ToolCallSignature,
     canonical_tool_args,
     classify_tool_failure,
+    _VOLATILE_ARGS_KEYS,
 )
 
 
@@ -33,6 +34,71 @@ def test_tool_call_signature_hashes_canonical_nested_unicode_args_without_exposi
     assert metadata == {"tool_name": "web_search", "args_hash": sig_a.args_hash}
     assert "secret-token-value" not in json.dumps(metadata)
     assert "☤" not in json.dumps(metadata)
+
+
+def test_signature_ignores_volatile_args_fields():
+    """M3: two calls differing only in heartbeat/time/run-id fields hash the same."""
+    semantic = {"query": "hermes docs", "limit": 5}
+    noisy = {
+        "query": "hermes docs",
+        "limit": 5,
+        "timestamp": 1795306476,
+        "started_at": "2026-11-22T00:14:36+00:00",
+        "duration_seconds": 3.14,
+        "heartbeat": {"seq": 7, "at": 1795306476},
+        "session_id": "s-9012",
+        "run_id": "some-run-abc",
+        "last_heartbeat": 1795306480,
+    }
+    sig_a = ToolCallSignature.from_call("web_search", semantic)
+    sig_b = ToolCallSignature.from_call("web_search", noisy)
+    assert sig_a == sig_b, "volatile args fields must be stripped before hashing"
+
+
+def test_signature_preserves_real_semantic_differences():
+    """M3: genuine content differences must still produce distinct signatures."""
+    args_1 = {"query": "python", "language": "en"}
+    args_2 = {"query": "python", "language": "de"}
+    args_3 = {"query": "python"}  # structurally different, not a volatile-field difference
+    assert ToolCallSignature.from_call("web_search", args_1) != ToolCallSignature.from_call("web_search", args_2)
+    assert ToolCallSignature.from_call("web_search", args_1) != ToolCallSignature.from_call("web_search", args_3)
+
+
+def test_volatile_keys_are_a_testable_constant():
+    assert "timestamp" in _VOLATILE_ARGS_KEYS
+    assert "started_at" in _VOLATILE_ARGS_KEYS
+    assert "duration_seconds" in _VOLATILE_ARGS_KEYS
+    assert "last_heartbeat" in _VOLATILE_ARGS_KEYS
+    # user-intent identifiers must NOT be stripped (kanban/delegate args)
+    assert "task_id" not in _VOLATILE_ARGS_KEYS
+
+
+def test_identical_call_streak_fires_with_volatile_args_60s_apart():
+    """M3 acceptance: two semantically identical calls > 60 s apart still form the
+    identical-call streak and halt. The harness re-injects heartbeat/timestamp fields
+    into args on every invocation (the "60 s apart" wall-clock gap), and the terminal
+    output is unchanged (same clock format) — only the volatile args fields differ, so
+    the pre-M3 args hash differed and the streak never fired."""
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(hard_stop_enabled=True, no_progress_block_after=3)
+    )
+    # Same tool + meaningful args; harness-injected volatile fields change every call
+    # (different timestamps/heartbeat counts per invocation, > 60 s wall-clock apart).
+    semantic_args = {"command": "date"}
+    calls = [
+        ({"command": "date", "timestamp": 1795306476, "last_heartbeat": 7}, "Sat Nov 22 00:00:01 UTC 2026\n"),
+        ({"command": "date", "timestamp": 1795306541, "last_heartbeat": 8}, "Sat Nov 22 00:00:01 UTC 2026\n"),
+        ({"command": "date", "timestamp": 1795306602, "last_heartbeat": 9}, "Sat Nov 22 00:00:01 UTC 2026\n"),
+    ]
+    for args, result in calls:
+        controller.observe_call("terminal", args, result, failed=False)
+        if controller.halt_decision is not None:
+            break
+    halt = controller.halt_decision
+    assert halt is not None, "identical calls > 60 s apart must still trigger the halt"
+    assert halt.code == "identical_call_streak_halt"
+    # Sanity: without the volatile-field strip these args would hash differently.
+    assert ToolCallSignature.from_call("terminal", calls[0][0]) == ToolCallSignature.from_call("terminal", calls[1][0])
 
 
 

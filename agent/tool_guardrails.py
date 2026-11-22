@@ -26,6 +26,52 @@ IDEMPOTENT_TOOL_NAMES = frozenset({
     "mcp_filesystem_search_files",
 })
 
+# Keys whose values are non-deterministic across semantically identical calls.
+# Stripped from args before the signature hash so that two calls with the same
+# tool and meaningful arguments but different timing / heartbeat fields still
+# produce the same signature (identical_call_streak_halt fires even > 60 s apart).
+# Covers: wall-clock timestamps, elapsed/duration, heartbeat, session/request/run-IDs,
+# and other noise fields that change on every invocation.
+_VOLATILE_ARGS_KEYS = frozenset({
+    # General timing / heartbeat
+    "timestamp", "started_at", "ended_at", "start_time", "end_time", "elapsed", "elapsed_ms",
+    "duration", "duration_seconds", "running_time", "processing_time", "wall_time",
+    "heartbeat", "last_heartbeat", "last_heartbeat_at", "next_heartbeat", "heartbeat_interval",
+    "check_interval", "poll_interval",
+    # Session / request / correlation IDs (not user intent)
+    "session_id", "request_id", "run_id", "correlation_id", "trace_id", "span_id",
+    "job_id", "call_id", "invocation_id", "execution_id",
+    # Miscellaneous volatile metadata
+    "retry_count", "retry", "attempt", "attempts", "attempt_count",
+    "created_at", "updated_at", "modified_at",
+    "client_time", "server_time", "time",
+    "user_agent", "client_info",
+})
+
+
+def _strip_volatile_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a dict with volatile keys stripped recursively.
+
+    Non-deterministic fields (timestamps, heartbeat, IDs, elapsed time) that change on every
+    invocation are removed so that semantically identical calls still produce the same signature.
+    Structural keys (e.g. pagination) that differ semantically are preserved.
+    """
+    result: dict[str, Any] = {}
+    for k, v in args.items():
+        if k in _VOLATILE_ARGS_KEYS:
+            continue
+        if isinstance(v, dict):
+            result[k] = _strip_volatile_args(v)
+        elif isinstance(v, list):
+            result[k] = [
+                _strip_volatile_args(item) if isinstance(item, dict) else item
+                for item in v
+            ]
+        else:
+            result[k] = v
+    return result
+
+
 MUTATING_TOOL_NAMES = frozenset({
     "terminal", "execute_code", "write_file", "patch", "todo_list", "memory", "skill_manage",
     "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_navigate",
@@ -172,7 +218,11 @@ class ToolCallSignature:
 
     @classmethod
     def from_call(cls, tool_name: str, args: Mapping[str, Any] | None) -> ToolCallSignature:
-        return cls(tool_name=tool_name, args_hash=_sha256(canonical_tool_args(args or {})))
+        # Strip volatile/timing fields from args before hashing so that two
+        # semantically identical calls (same tool + meaningful params) produce
+        # the same signature even when they differ only in timestamps, heartbeat
+        # counts, or runtime IDs injected by the harness on every invocation.
+        return cls(tool_name=tool_name, args_hash=_sha256(canonical_tool_args(_strip_volatile_args(args or {}))))
 
     def to_metadata(self) -> dict[str, str]:
         """Return public metadata without raw argument values."""
