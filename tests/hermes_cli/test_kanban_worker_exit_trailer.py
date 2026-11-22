@@ -103,6 +103,42 @@ def test_violation_budget_trip_holds_until_operator_unblock(kanban_home):
         assert kb.get_task(conn, tid).status == "ready"
 
 
+def test_guardrail_halt_books_blocked_no_redispatch(kanban_home):
+    """M2: a worker that exits on a tool-guardrail halt (```KANBAN_GUARDRAIL_HALT_EXIT_CODE```)
+    is parked ``blocked`` — NOT ``crashed``, NOT ``protocol_violation``; ``retry_status`` stays
+    ``blocked``; and ``recompute_ready`` must NOT promote it back to ``ready`` (no re-dispatch,
+    otherwise the halt re-fires and the card loops)."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="halt", assignee="a")
+        _dead_worker_with_log(conn, tid, 72001, kb.KANBAN_GUARDRAIL_HALT_EXIT_CODE)
+
+        kbd.detect_crashed_workers(conn)
+
+        run = conn.execute(
+            "SELECT outcome, error, metadata FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+            (tid,)).fetchone()
+        ev = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+        task = kb.get_task(conn, tid)
+        meta = kb._json_dict(run["metadata"])
+        # Controlled stop: a blocked outcome, not a crash and not a protocol violation.
+        assert run["outcome"] == "blocked"
+        assert meta.get("guardrail_halt") is True
+        assert meta.get("protocol_violation") not in (True,)
+        assert kbd._protocol_violation_streak(conn, tid) == 0
+        # retry_status stays blocked (the reclaim UPDATE ran with retry_status='blocked').
+        assert ev["kind"] == "blocked"
+
+        # The card ends blocked, and recompute_ready must not re-dispatch it to ready.
+        assert task.status == "blocked"
+        kb.recompute_ready(conn, failure_limit=10)
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        # Only an explicit operator unblock lifts it.
+        kb.unblock_task(conn, tid)
+        assert kb.get_task(conn, tid).status == "ready"
+
+
 def test_plain_budget_trip_still_auto_recovers(kanban_home):
     """A unified-budget trip carries no ``sticky`` marker, so the two recovery paths on main
     survive: raising the dispatcher ``failure_limit`` past the counter promotes the card, and

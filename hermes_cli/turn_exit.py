@@ -29,6 +29,17 @@ def turn_exit_code(
         return 1
     if result.get("interrupted"):
         return 130
+    if kanban_worker:
+        # A tool-guardrail halt (identical-call-streak / cycle) is a controlled stop, not a
+        # task failure: the worker deliberately skipped a terminal board tool. It must exit
+        # with the sentinel whether or not the turn is framed failed — the halt message is a
+        # normal (non-failed) response, so without this check it would book 0 and read as a
+        # protocol violation (re-dispatch). The sentinel lets the dispatcher park the card
+        # ``blocked`` (retry_status stays ``blocked``, no re-dispatch, no ``crashed``).
+        # ``guardrail`` metadata is stamped by ``turn_finalizer`` on the halt decision.
+        if result.get("guardrail") or result.get("failure_reason") == "guardrail_halt":
+            from hermes_cli.kanban_db import KANBAN_GUARDRAIL_HALT_EXIT_CODE
+            return KANBAN_GUARDRAIL_HALT_EXIT_CODE
     if not (result.get("failed") or result.get("partial") or result.get("completed") is False):
         return 0
     if kanban_worker:

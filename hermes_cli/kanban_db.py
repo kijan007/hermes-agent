@@ -314,6 +314,15 @@ KANBAN_RATE_LIMIT_EXIT_CODE = 75
 # the FIRST occurrence instead of spending ``failure_limit`` identical spawns. 78 == BSD EX_CONFIG.
 KANBAN_TERMINAL_PROVIDER_EXIT_CODE = 78
 
+# Worker exit "tool guardrail halt": the worker's turn ended on an identical-call-streak (or
+# cycle) guardrail halt (``guardrail_halt``) and it deliberately did NOT call a terminal board
+# tool, because the halt is a controlled stop, not a crash and not a skipped handoff. The
+# dispatcher parks the card ``blocked`` with ``retry_status`` left ``blocked`` — it is NOT
+# re-dispatched back to ``ready`` (a replay would re-halt in a loop) and it is NOT classified
+# ``crashed``/``protocol_violation``. 76 == BSD EX_UNAVAILABLE (the stop is policy-induced, the
+# worker will not retry on its own).
+KANBAN_GUARDRAIL_HALT_EXIT_CODE = 76
+
 
 def _resolve_crash_grace_seconds() -> int:
     """``HERMES_KANBAN_CRASH_GRACE_SECONDS`` (0 = immediate, for tests) else default."""

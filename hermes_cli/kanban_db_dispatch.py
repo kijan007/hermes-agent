@@ -251,6 +251,8 @@ def _exit_code_kind(code: int) -> tuple[str, int]:
         return ("rate_limited", code)
     if code == _kb.KANBAN_TERMINAL_PROVIDER_EXIT_CODE:
         return ("terminal_provider", code)
+    if code == _kb.KANBAN_GUARDRAIL_HALT_EXIT_CODE:
+        return ("guardrail_halt", code)
     return ("nonzero_exit", code)
 
 
@@ -1049,12 +1051,21 @@ class _DeadWorker:
     terminal_provider: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
+    guardrail_halt: bool = False
+    """``KANBAN_GUARDRAIL_HALT_EXIT_CODE``: the worker's turn ended on a tool-guardrail
+    halt — a controlled stop. The card is parked ``blocked`` (retry_status ``blocked``,
+    no re-dispatch), never ``crashed``/``protocol_violation``."""
 
     @property
     def run_outcome(self) -> str:
         # A rate-limited requeue is recorded as ``rate_limited`` so board history
-        # doesn't show a phantom crash for a quota wall.
-        return "rate_limited" if self.rate_limited else "crashed"
+        # doesn't show a phantom crash for a quota wall. A guardrail halt is a
+        # controlled stop, not a crash: it books ``blocked``.
+        if self.rate_limited:
+            return "rate_limited"
+        if self.guardrail_halt:
+            return "blocked"
+        return "crashed"
 
 
 def _classify_dead_worker(
@@ -1100,6 +1111,21 @@ def _classify_dead_worker_exit(
         logged = _worker_log_exit_code(task_id, board=board)
         if logged is not None:
             kind, code = _exit_code_kind(logged)
+    if kind == "guardrail_halt":
+        # A controlled stop: the turn ended on a tool-guardrail halt and the worker
+        # deliberately did NOT call a terminal board tool. Book it ``blocked`` — never
+        # ``crashed`` and never a ``protocol_violation`` (the missing handoff is the
+        # halt's intended effect, not skipped paperwork). ``_reclaim_dead_workers``
+        # keeps the card ``blocked`` (retry_status stays ``blocked``, no re-dispatch);
+        # ``_account_crashes`` charges nothing because a replay would re-halt.
+        return _DeadWorker(
+            kind, code,
+            f"pid {pid} halted on a tool guardrail (exit {code}) — card parked blocked, "
+            "no re-dispatch (a replay would re-halt in a loop).",
+            "guardrail_halt",
+            {"pid": pid, "claimer": claimer, "exit_code": code, "guardrail_halt": True},
+            guardrail_halt=True,
+        )
     if kind == "clean_exit":
         # rc=0 while still ``running``: usually the work succeeded and only the
         # paperwork was skipped; the corrective sentence reaches the retry
@@ -1194,6 +1220,10 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             dead = _classify_dead_worker(pid, row["claim_lock"], exit_code, task_id=row["id"], board=board)
             apply_attempt_note(conn, row["id"], pid, dead)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
+            if dead.guardrail_halt:
+                # M2: a guardrail halt parks the card ``blocked`` — retry_status stays
+                # ``blocked`` and the card is NOT re-dispatched (a replay would re-halt).
+                retry_status = "blocked"
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
@@ -1211,6 +1241,17 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 metadata=dict(dead.event_payload),
             )
             _kb._append_event(conn, row["id"], dead.event_kind, dead.event_payload, run_id=run_id)
+            if dead.guardrail_halt:
+                # M2: park the card the same way an explicit ``kanban_block`` does — a
+                # ``blocked`` event makes ``_has_sticky_block`` (and thus
+                # ``recompute_ready``) hold it for an operator; only ``unblock_task``
+                # exits it. Without this the blocked card would be promoted back to
+                # ``ready`` in the same tick and the halt would re-dispatch the loop.
+                _kb._append_event(conn, row["id"], "blocked", {
+                    "reason": "guardrail_halt",
+                    "pid": pid,
+                    "retry_status": retry_status,
+                }, run_id=run_id)
             sweep.exited_hook_payloads.append({
                 "task_id": row["id"],
                 "assignee": row["assignee"],
@@ -1221,18 +1262,24 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 "outcome": dead.run_outcome,
                 "retry_status": retry_status,
             })
-            if dead.rate_limited or dead.protocol_violation:
+            if dead.rate_limited or dead.protocol_violation or dead.guardrail_halt:
                 # Stamp last_failure_error WITHOUT touching ``consecutive_failures``:
                 # a rate-limited requeue must show ``check_respawn_guard`` a quota
                 # blocker; a below-budget protocol violation never reaches
                 # ``_record_task_failure`` (which stamps this column), yet the
-                # board UI and retry worker need the corrective message.
+                # board UI and retry worker need the corrective message. A guardrail
+                # halt parks the card blocked and never counts a failure (a replay
+                # would re-halt, so re-dispatching it back is the loop).
                 conn.execute(
                     "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                     (dead.error_text[:500], row["id"]),
                 )
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
+            elif dead.guardrail_halt:
+                # A controlled stop: NOT a crash. The card is already ``blocked`` via
+                # retry_status; it must not reach the breaker accounting below.
+                pass
             else:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
