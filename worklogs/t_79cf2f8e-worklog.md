@@ -69,4 +69,11 @@ Board-Call wurde pauschal als `protocol_violation` → `ready` (Re-Dispatch-Loop
   - `turn_exit_code`-Unit-Check: nicht-failed Guardrail-Halt → 76, failed-Guardrail-Halt → 76, normaler Turn → 0. OK.
 
 ## Dev-Integration
-- Commit(s): <sha> auf origin/main (Push nach kijan007/hermes-agent, Branch main — kein dev-Branch, kein kpt-Done-Gate).
+- Commit: `d8d2ca27fa` auf **origin/dev** (Push via Token in Remote-URL).
+- Worktree: `/workspace/.worktrees/t_79cf2f8e`, Branch `task/t_79cf2f8e`.
+- Die Implementierung (M2 Exit-76 + Dispatcher-Block) lag bereits auf dev durch die
+  Geschwister-Tasks t_7dbbb2e8/t_e875e1ac. Mein Commit bringt den M3-Test und die
+  volatile-strip M3-Änderung in `canonical_tool_args` (doppeltes Strippen ist
+  unschädlich: `_strip_volatile_args` ist idempotent, das kanban-workspace-Repo hat
+  die M2-Impl nicht). Push-Auth über Token in Remote-URL (GHO_... aus
+  `~/.hermes/profiles/qa/home/.git-credentials`).
