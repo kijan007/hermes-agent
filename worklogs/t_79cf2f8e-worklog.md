@@ -77,3 +77,31 @@ Board-Call wurde pauschal als `protocol_violation` → `ready` (Re-Dispatch-Loop
   unschädlich: `_strip_volatile_args` ist idempotent, das kanban-workspace-Repo hat
   die M2-Impl nicht). Push-Auth über Token in Remote-URL (GHO_... aus
   `~/.hermes/profiles/qa/home/.git-credentials`).
+
+## Nachverifikation (2. Lauf, 2026-11-22 ~11:00)
+Vorgängiger Lauf hatte einen **Shadowing-Bug** hinterlassen: der eigene M3-Commit
+(d8d2ca27fa) definierte eine ZWEITE `_strip_volatile_args` + `_VOLATILE_ARG_KEYS`
+(Zeile 258ff), die die kanonische M3-Implementierung (Zeile 35ff, `_VOLATILE_ARGS_KEYS`,
+completes Key-Set) überschrieben hat — Folge: `test_signature_ignores_volatile_args_fields`
+und `test_identical_call_streak_fires_with_volatile_args_60s_apart` schlugen fehl.
+
+1. Fix: `git commit fd9a28f25f` — Schatten-Definitionen entfernt, `canonical_tool_args`
+   auf `_canonical_json(dict(args))` zurückgesetzt (Strip passiert allein in
+   `ToolCallSignature.from_call`).
+2. Suite: `HERMES_HOME=/tmp/fakehome_79cf python3 -m pytest tests/agent/test_tool_guardrails.py
+   tests/agent/test_agent_guardrails.py -q` → **61 passed** (56 Baseline + 5 neue).
+3. M2-Test: `tests/hermes_cli/test_kanban_worker_exit_trailer.py -q` → **6 passed**,
+   davon `test_guardrail_halt_books_blocked_no_redispatch` PASSED.
+4. Gezielte Neue-Tests-Verifikation (alle 4 PASSED):
+   - `test_guardrail_halt_books_blocked_no_redispatch` (M2)
+   - `test_identical_call_streak_halts_despite_volatile_heartbeat_gap` (M3)
+   - `test_signature_ignores_volatile_args_fields` (M3)
+   - `test_identical_call_streak_fires_with_volatile_args_60s_apart` (M3)
+5. donegate-check.sh → **PREFLIGHT: OK**.
+
+## Dev-Integration (2. Lauf)
+- Commit `fd9a28f25f13c75c5385f095863338ea760fa5e7` auf **origin/dev** gepusht
+  (verifiziert via `git ls-remote origin refs/heads/dev` → `fd9a28f25f13`).
+- Auch auf `origin/task/t_79cf2f8e` gespiegelt (`fd9a28f25f13`).
+- Branch main ist bewusst unangetastet (Upstream-Spiegel); Integration-Ziel ist
+  origin/dev gemäss Done-Gate und Team-Klärung.
