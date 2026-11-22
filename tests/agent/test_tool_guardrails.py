@@ -279,6 +279,29 @@ def test_identical_call_streak_halts_any_tool_when_hard_stop_enabled():
     assert halt.tool_name == "terminal" and halt.count == 5
 
 
+def test_identical_call_streak_halts_despite_volatile_heartbeat_gap():
+    # M3: two IDENTICAL calls whose args differ ONLY in heartbeat/time-adjacent fields
+    # (a > 60 s gap between heartbeats) must share a signature, so the consecutive-identical
+    # streak still forms and the halt fires. Before M3 the volatile field split the
+    # signature every call and the streak never reached the threshold (no halt).
+    controller = ToolCallGuardrailController(
+        ToolCallGuardrailConfig(hard_stop_enabled=True, no_progress_block_after=5)
+    )
+    base = {"command": "check_status", "task_id": "t_1"}
+    # Same call 5 times, each with a heartbeat/timestamp 90 s later than the previous —
+    # the only thing that changes is the volatile field.
+    for i in range(5):
+        args = {**base, "heartbeat": {"ts": 1_700_000_000 + i * 90, "now": f"t{i}"}}
+        controller.observe_call("terminal", args, "ok\n", failed=False)
+        halt = controller.halt_decision
+        if i < 4:
+            assert halt is None, f"halted early at {i}"
+    halt = controller.halt_decision
+    assert halt is not None and halt.should_halt
+    assert halt.code == "identical_call_streak_halt"
+    assert halt.count == 5
+
+
 def test_identical_call_streak_never_halts_when_hard_stop_disabled_or_for_pollers():
     soft = ToolCallGuardrailController(
         ToolCallGuardrailConfig(hard_stop_enabled=False, no_progress_block_after=2)

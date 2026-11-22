@@ -255,6 +255,24 @@ class ToolGuardrailDecision:
         return data
 
 
+_VOLATILE_ARG_KEYS = frozenset({
+    "heartbeat", "sent_at", "at", "now", "timestamp", "ts", "time",
+    "_ts", "started_at", "ended_at", "created_at",
+})
+"""Keys whose values change on every call even when the intent is identical."""
+
+
+def _strip_volatile_args(args: Any) -> Any:
+    """Remove or normalise volatile (time-varying) keys so two calls that differ only
+    in timing/heartbeat metadata share the same canonical representation."""
+    if not isinstance(args, dict):
+        return args
+    return {
+        k: ("<<volatile>>" if k in _VOLATILE_ARG_KEYS else _strip_volatile_args(v))
+        for k, v in args.items()
+    }
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
 
@@ -263,7 +281,7 @@ def canonical_tool_args(args: Mapping[str, Any]) -> str:
     """Return sorted compact JSON for parsed tool arguments."""
     if not isinstance(args, Mapping):
         raise TypeError(f"tool args must be a mapping, got {type(args).__name__}")
-    return _canonical_json(args)
+    return _canonical_json(_strip_volatile_args(dict(args)))
 
 
 def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]:
